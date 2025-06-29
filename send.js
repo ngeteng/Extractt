@@ -1,16 +1,15 @@
-// kumpulSaldo.js
+// kumpulSaldo_v2.js
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { ethers } = require('ethers');
 
 // --- KONFIGURASI PENTING ---
-// !!! GANTI DENGAN ALAMAT UTAMA KAMU UNTUK MENERIMA SEMUA SALDO !!!
-const ALAMAT_PENERIMA = "0x4375d555ede2a6f1892104a5a953fa9c2ea18bf8";
+const ALAMAT_PENERIMA = process.env.ALAMAT_PENERIMA; // GANTI DENGAN ALAMAT WALLET UTAMAMU
 
 // --- VALIDASI & INISIALISASI ---
 if (ALAMAT_PENERIMA === "0xALAMATUTAMAKAMU" || !ethers.isAddress(ALAMAT_PENERIMA)) {
-    console.error("⛔ Berhenti! Ganti 'ALAMAT_PENERIMA' dengan alamat wallet utamamu yang valid di dalam file kumpulSaldo.js");
+    console.error("⛔ Berhenti! Ganti 'ALAMAT_PENERIMA' dengan alamat wallet utamamu yang valid.");
     process.exit(1);
 }
 const rpcUrl = process.env.RPC_URL;
@@ -22,47 +21,40 @@ const provider = new ethers.JsonRpcProvider(rpcUrl);
 const inputFile = path.join(__dirname, 'SALDO_DITEMUKAN.json');
 
 // --- FUNGSI UTAMA ---
-async function sweepWallets() {
-    console.log(`Membaca daftar wallet dari ${inputFile}...`);
+async function sweepWalletsV2() {
     if (!fs.existsSync(inputFile)) {
         console.error(`File ${inputFile} tidak ditemukan! Jalankan cekSaldo.js terlebih dahulu.`);
         return;
     }
 
     const walletsToSweep = JSON.parse(fs.readFileSync(inputFile, 'utf-8'));
-    if (walletsToSweep.length === 0) {
-        console.log("Tidak ada wallet dengan saldo untuk dikumpulkan.");
-        return;
-    }
+    console.log(`🚀 Memulai proses pengumpulan cepat untuk ${walletsToSweep.length} wallet...`);
+    console.log(`Tujuan Pengumpulan: ${ALAMAT_PENERIMA}\n`);
 
-    console.log(`Tujuan Pengumpulan: ${ALAMAT_PENERIMA}`);
-    console.log(`Ditemukan ${walletsToSweep.length} wallet. Memulai proses pengumpulan...\n`);
+    // Counter untuk ringkasan hasil
+    let successCount = 0;
+    let insufficientFundsCount = 0;
+    let otherErrorCount = 0;
 
-    for (const walletData of walletsToSweep) {
+    for (const [index, walletData] of walletsToSweep.entries()) {
         const wallet = new ethers.Wallet(walletData.privateKey, provider);
-        console.log(`--- Memproses Wallet: ${wallet.address} ---`);
+        process.stdout.write(`[${index + 1}/${walletsToSweep.length}] Memproses ${wallet.address}... `);
 
         try {
             const balanceWei = BigInt(walletData.balanceWei);
             const feeData = await provider.getFeeData();
-            // Kita gunakan gasPrice dari provider untuk mendapatkan harga pasar saat ini
             const gasPrice = feeData.gasPrice;
-            const gasLimit = BigInt(21000); // Gas limit standar untuk transfer ETH
+            const gasLimit = BigInt(21000);
             const estimatedFee = gasPrice * gasLimit;
 
-            console.log(`Saldo: ${ethers.formatEther(balanceWei)} ETH`);
-            console.log(`Estimasi Biaya Gas: ${ethers.formatEther(estimatedFee)} ETH`);
-
-            // Cek paling penting: apakah saldo cukup untuk bayar gas?
+            // Cek saldo vs biaya gas
             if (balanceWei <= estimatedFee) {
-                console.log("❌ Saldo tidak cukup untuk membayar biaya gas. Melewati wallet ini.\n");
-                continue;
+                console.log("-> ❌ Gagal: Saldo tidak cukup untuk bayar gas.");
+                insufficientFundsCount++;
+                continue; // Lanjut ke wallet berikutnya
             }
 
-            // Kirim saldo setelah dikurangi biaya gas
             const valueToSend = balanceWei - estimatedFee;
-            console.log(`Jumlah yang akan dikirim: ${ethers.formatEther(valueToSend)} ETH`);
-
             const tx = {
                 to: ALAMAT_PENERIMA,
                 value: valueToSend,
@@ -71,19 +63,34 @@ async function sweepWallets() {
             };
 
             const txResponse = await wallet.sendTransaction(tx);
-            console.log(`✅ Transaksi Terkirim! Cek di Etherscan: https://etherscan.io/tx/${txResponse.hash}`);
-            console.log("Menunggu konfirmasi...");
-            
-            await txResponse.wait(1); // Menunggu 1 konfirmasi
-            console.log("✅ Transaksi Sukses & Terkonfirmasi!\n");
+            console.log(`-> ✅ Terkirim! Hash: ${txResponse.hash.slice(0, 12)}...`);
+            successCount++;
+
+            // TIDAK ADA "await txResponse.wait()" LAGI, LANGSUNG LANJUT!
 
         } catch (error) {
-            console.error(`❌ Gagal memproses wallet ${wallet.address}:`, error.message, "\n");
+            // Log error yang lebih ramah
+            if (error.code === 'INSUFFICIENT_FUNDS') {
+                console.log("-> ❌ Gagal: Saldo tidak cukup (error pra-kirim).");
+                insufficientFundsCount++;
+            } else {
+                console.log(`-> 🚨 Gagal: Terjadi error lain (${error.code || 'UNKNOWN'}).`);
+                otherErrorCount++;
+            }
         }
     }
-    console.log("--- Proses Pengumpulan Selesai ---");
+
+    // --- Tampilkan Ringkasan Hasil ---
+    console.log("\n--- ✨ Ringkasan Proses ✨ ---");
+    console.log(`Total Wallet Diproses : ${walletsToSweep.length}`);
+    console.log(`✅ Berhasil Dikirim      : ${successCount}`);
+    console.log(`❌ Gagal (Saldo Kurang) : ${insufficientFundsCount}`);
+    console.log(`🚨 Gagal (Error Lain)   : ${otherErrorCount}`);
+    console.log("\nCatatan: 'Berhasil Dikirim' berarti transaksi sudah masuk ke jaringan,");
+    console.log("bukan berarti sudah pasti terkonfirmasi di blockchain.");
+    console.log("--- Proses Selesai ---");
 }
 
-sweepWallets().catch(error => {
-    console.error("Terjadi kesalahan fatal selama proses:", error);
+sweepWalletsV2().catch(error => {
+    console.error("\nTerjadi kesalahan fatal selama proses:", error);
 });
